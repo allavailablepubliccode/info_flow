@@ -5,8 +5,8 @@
 % masks out background (zero-valued pixels), and displays the activity maps
 % for each mouse. M1 is shown alone; M2–M5 are shown in a 2x2 grid.
 %
-% Author: [Your Name]
-% Date: [Insert Date]
+% Author: Erik D. Fagerholm
+% Date: 6 August 2025
 %==========================================================================
 
 clear; clc; close all;

@@ -1,115 +1,101 @@
-% generate_fig5.m
-% Figure 5: Recovery of transformation parameters from summary statistics of a synthetic signal
+%==========================================================================
+% Generate Figure 5: Predicting AM from V1 via power-law transformation
+%
+% This script:
+%   - Loads calcium imaging data for one mouse
+%   - Extracts V1 and AM region signals (average or PC1)
+%   - Fits a nonlinear transformation model (plaw_kde) from V1 to AM
+%   - Normalizes and plots the true vs. predicted AM signals
+%   - Performs a circular permutation test to assess significance
+%
+% Author: Erik D. Fagerholm
+% Date: 6 August 2025
+%==========================================================================
 
-clear; clc; close all; rng(0);  % for reproducibility
+clear; clc; close all;
 
-%% === 1. Generate synthetic signal with drift ===
-T = 1000;         % number of time points
-dt = 0.01;        % time step
-t = (0:T-1) * dt; % time vector
-D = 0.05;         % diffusion coefficient
+%% === Parameters ===
+mouse_id = 3;
+use_pc1 = true;         % Whether to use first PC instead of average signal
+n_iter = 1000;          % Permutation iterations for significance test
 
-a = sin(2 * pi * 0.5 * t);  % oscillatory drift
-x = zeros(1, T);            % initialize signal
+%% === Load Data ===
+load(['~/Dropbox/Two_Photon/M' num2str(mouse_id) '.mat']);  % Loads `movie`, `map`
 
-% Euler-Maruyama integration of stochastic drift
-for i = 2:T
-    x(i) = x(i-1) + a(i-1)*dt + sqrt(2*D*dt)*randn;
+% Reshape to 2D: [pixels x time]
+movie = reshape(movie, size(movie,1)*size(movie,2), size(movie,3));
+map   = reshape(map,   size(map,1)*size(map,2), 1);
+
+% Extract indices for brain regions
+V1_idx = find(map == 6);
+AM_idx = find(map == 2);
+
+% Extract time series data
+V1_mat = movie(V1_idx, :);
+AM_mat = movie(AM_idx, :);
+
+% === Extract region activity signals ===
+if use_pc1
+    V1 = pca_first_component(V1_mat);  % More robust to noise
+    AM  = pca_first_component(AM_mat);
+else
+    V1 = mean(V1_mat)';  % Mean across pixels
+    AM  = mean(AM_mat)';
 end
 
-%% === 2. Estimate log-density log q(x(t)) via histogram ===
-[counts, edges] = histcounts(x, 100, 'Normalization', 'pdf');
-bin_centers = 0.5 * (edges(1:end-1) + edges(2:end));
-logq_vals = log(counts + 1e-8);       % avoid log(0)
-logq_mean = mean(logq_vals);          % mean of log-density
+%% === Fit nonlinear model: AM = plaw_kde(V1) ===
+[R2_true, AM_est, alpha, beta] = plaw_kde(V1, AM);
 
-logq_x = interp1(bin_centers, logq_vals, x, 'linear', 'extrap');  % log-density at each x(t)
+% Normalize both signals to [0,1] for plotting
+AM_norm     = normalize_to_unit_range(AM, AM_est);
+AM_est_norm = normalize_to_unit_range(AM_est, AM);
 
-%% === 3. Ground truth transformation (entropy + expectation flow) ===
-alpha_true = 0.3;
-beta_true  = 0.9;
-mu_global  = mean(x);
+% Time axis
+Fs = numel(V1) / 5 / 60;  % Estimate sampling rate (Hz) from 5 min recording
+t = (1:numel(V1)) / Fs;
 
-x_lambda = x + ...
-    alpha_true * (logq_x - logq_mean) + ...
-    beta_true * (x - mu_global);  % apply transformation
+%% === Plot predicted vs true AM signals ===
+figure('Color','w'); set(gcf, 'Position', [0, 284, 1025, 253]);
+plot(t(1:109), AM_norm(1:109), 'k', 'LineWidth', 1.2); hold on;
+plot(t(1:109), AM_est_norm(1:109), 'r', 'LineWidth', 1.2);
+legend('AM (true)', 'AM (estimated)', 'Location', 'southeast');
+xlabel('Time (s)'); ylabel('Normalized signal');
+title(sprintf('Mouse M%d | R^2 = %.3f | α = %.3f | β = %.3f', ...
+    mouse_id, R2_true, alpha, beta));
+set(gca, 'FontSize', 14, 'LineWidth', 1.2);
 
-%% === 4. Compute summary stats in sliding windows ===
-window = 100;
-step = 10;
-n_windows = floor((T - window)/step);
+%% === Permutation test (circular shift) ===
+R2_null = zeros(n_iter, 1);
+N = numel(AM);
 
-mu_t     = zeros(1, n_windows);
-sigma2_t = zeros(1, n_windows);
-q_mu_t   = zeros(1, n_windows);
-
-for i = 1:n_windows
-    idx = (i-1)*step + (1:window);
-    xi = x(idx);
-    
-    % Kernel density estimate to get mode (peak) of PDF
-    [pdf_vals, grid] = ksdensity(xi);
-    [~, id] = max(pdf_vals);
-    
-    mu_t(i)     = grid(id);    % mode as proxy for location
-    sigma2_t(i) = var(xi);     % variance
-    q_mu_t(i)   = max(pdf_vals); % height at mode
+for i = 1:n_iter
+    shift = randi(N - 1);
+    AM_perm = circshift(AM, shift);
+    R2_null(i) = plaw_kde(V1, AM_perm);  % Only R² needed
 end
 
-%% === 5. Apply same transformation analytically to summary stats ===
-mu_lambda = mu_t + (beta_true .* sigma2_t) ./ (1 + alpha_true);
-q_lambda  = sqrt(1 + alpha_true) ./ sqrt(2 * pi .* sigma2_t);
+% Compute empirical p-value
+p_val = mean(R2_null >= R2_true);
 
-% Add noise to simulate empirical observations
-mu_lambda_obs = mu_lambda + 0.03 * randn(size(mu_lambda));
-q_lambda_obs  = q_lambda .* (1 + 0.03 * randn(size(q_lambda)));
+%% === Report Results ===
+fprintf('Mouse %d results:\n', mouse_id);
+fprintf('Alpha: %.4f\n', alpha);
+fprintf('Beta : %.4f\n', beta);
+fprintf('True R²: %.4f\n', R2_true);
+fprintf('Permutation-based p-value: %.4f\n', p_val);
 
-%% === 6. Estimate alpha and beta from observed summary stats ===
-errfun = @(params) sum( ...
-    (mu_lambda_obs - (mu_t + (params(2) .* sigma2_t) ./ (1 + params(1)))).^2 + ...
-    (q_lambda_obs  - sqrt(1 + params(1)) ./ sqrt(2 * pi .* sigma2_t)).^2 ...
-);
+%% === Subfunctions ===
 
-params0 = [0.1, 0.1];  % initial guess
-estimated = fminsearch(errfun, params0);
-alpha_fit = estimated(1);
-beta_fit  = estimated(2);
+function pc1 = pca_first_component(data_mat)
+    % Returns the first principal component (temporal)
+    data_mat = detrend(data_mat')';         % Optional: remove linear trend
+    [~, score, ~] = pca(data_mat');         % PCA along time dimension
+    pc1 = score(:,1);                       % First PC time course
+end
 
-%% === 7. Evaluate estimation accuracy ===
-mae_alpha    = abs(alpha_fit - alpha_true);
-rmse_alpha   = sqrt((alpha_fit - alpha_true)^2);
-relerr_alpha = 100 * mae_alpha / abs(alpha_true);
-
-mae_beta    = abs(beta_fit - beta_true);
-rmse_beta   = sqrt((beta_fit - beta_true)^2);
-relerr_beta = 100 * mae_beta / abs(beta_true);
-
-%% === 8. Plot original, transformed, and recovered signals ===
-figure('Color','w');
-set(gcf, 'Position', [100, 100, 700, 500]);
-
-plot(t, x,          'k-', 'LineWidth', 1.5, 'DisplayName', 'Original $x(t)$'); hold on;
-plot(t, x_lambda,   'r-', 'LineWidth', 1.5, 'DisplayName', 'Transformed $x_\lambda(t)$');
-
-% === 9. Reconstruct signal using recovered parameters ===
-x_lambda_recon = x + ...
-    alpha_fit * (logq_x - logq_mean) + ...
-    beta_fit  * (x - mu_global);
-
-plot(t, x_lambda_recon, 'b--', 'LineWidth', 1.5, 'DisplayName', 'Recovered $x_\lambda(t)$');
-
-xlabel('$\mathit{Time}$',  'Interpreter', 'latex', 'FontSize', 22);
-ylabel('$\mathit{Signal}$','Interpreter', 'latex', 'FontSize', 22);
-set(gca, 'FontSize', 16, 'LineWidth', 1.2);
-legend('Location','northeast', 'Interpreter','latex', 'FontSize', 16, 'Box','off');
-
-%% === 10. Print stats ===
-fprintf('\nGround Truth alpha: %.4f\n', alpha_true);
-fprintf('Estimated     alpha: %.4f\n', alpha_fit);
-fprintf('Alpha MAE: %.4f, RMSE: %.4f, %%Error: %.2f%%\n', ...
-    mae_alpha, rmse_alpha, relerr_alpha);
-
-fprintf('\nGround Truth beta : %.4f\n', beta_true);
-fprintf('Estimated     beta : %.4f\n', beta_fit);
-fprintf('Beta  MAE: %.4f, RMSE: %.4f, %%Error: %.2f%%\n', ...
-    mae_beta, rmse_beta, relerr_beta);
+function normed = normalize_to_unit_range(sig, ref)
+    % Normalizes `sig` using min/max range of both sig and ref
+    lo = min([sig(:); ref(:)]);
+    hi = max([sig(:); ref(:)]);
+    normed = (sig - lo) / (hi - lo);
+end

@@ -1,197 +1,155 @@
-% generate_fig3.m
-% Generate Figure 3: Time series of cerebellum and cerebrum activity
+% upgraded_fig3_kde_wasserstein.m
+% Upgraded Fig. 3 with KDE, Wasserstein loss, constrained optimization,
+% and multiple curve similarity diagnostics
 
-clear; clc; close all;
+clear; clc; close all; rng(0);
 
-%% === Load segmentation mask info ===
-info = load('~/Dropbox/Work/AT_Calcium/20230222_LE_13002_data.mat');
-[cerebrum_mask, cerebellum_mask] = get_all_region_masks(info);
-Fs = info.data.sampling_frequency;
+%% === Parameters ===
+mu_0 = 0;
+sigma2_0 = 1;
+D = 1;
+alpha_true = 0.2;
+beta_true = 0.1;
+T = 100;
+t = linspace(0, 10, T);
+Nu = 0.1;
+xvals = linspace(-5, 5, 1000);
+time_indices = [1 10];
 
-numfiles = 28;
+%% === Simulate true samples and observations ===
+samples_per_t = 2000;
+q_true_all = cell(1, T);
+samples_obs = cell(1, T);
 
-%% === Process and save extracted signals from each recording ===
-for ii = 1:numfiles
-    disp(['Processing file ' num2str(ii) ' of ' num2str(numfiles)]);
+for ti = 1:T
+    sigma2_t = sigma2_0 + 2 * D * t(ti);
+    mu_t     = mu_0;
 
-    % Load .tif image sequence
-    fn = ['~/Dropbox/Work/AT_Calcium/tif/data-001_ratio_' num2str(ii) '.tif'];
-    frames = count_framenum(fn);
-    [rows, cols] = size(imread(fn, 1));
+    x = mu_t + sqrt(sigma2_t) * randn(samples_per_t, 1);
+    logq = -0.5 * ((x - mu_t).^2 / sigma2_t);
+    logq = logq - mean(logq);
 
-    data_cerebellum = zeros(rows, cols, frames);
-    data_cerebrum   = zeros(rows, cols, frames);
+    % Apply transformation
+    x_trans = x + alpha_true * logq + beta_true * (x - mu_t);
 
-    % === Loop through timepoints ===
-    for tt = 1:frames
-        img = double(imread(fn, tt));
+    % Add noise to simulate observation
+    x_obs = x_trans + Nu * randn(size(x_trans));
 
-        % Background subtraction using lowest 1% intensity
-        flat = img(:);
-        bg_thresh = prctile(flat, 1);
-        bg_mask = img <= bg_thresh;
-        background = mean(img(bg_mask));
-        img = img - background;
-
-        % Apply cerebrum and cerebellum masks
-        bell_img = img;  bell_img(cerebellum_mask == 0) = NaN;
-        cere_img = img;  cere_img(cerebrum_mask == 0)   = NaN;
-
-        data_cerebellum(:,:,tt) = bell_img;
-        data_cerebrum(:,:,tt)   = cere_img;
-    end
-
-    % Crop data to mask region
-    data_cerebellum = MaskData(data_cerebellum, cerebellum_mask);
-    data_cerebrum   = MaskData(data_cerebrum, cerebrum_mask);
-
-    % Smooth in space and time
-    data_cerebellum = gaussian_smooth(data_cerebellum, 3, 2);
-    data_cerebrum   = gaussian_smooth(data_cerebrum, 3, 2);
-
-    % Average over space to get 1D time series
-    data_cerebellum = squeeze(nanmean(nanmean(data_cerebellum, 1), 2));
-    data_cerebrum   = squeeze(nanmean(nanmean(data_cerebrum, 1), 2));
-
-    % Save extracted time series
-    save(['~/Dropbox/Work/AT_Calcium/mat/data-001_ratio_' num2str(ii) '.mat'], ...
-        'data_cerebellum', 'data_cerebrum');
+    samples_obs{ti} = x_obs;
+    q_true_all{ti} = x_trans;
 end
 
-%% === Concatenate and plot combined time series across all sessions ===
-cat_cerebellum = [];
-cat_cerebrum   = [];
+%% === Define Wasserstein loss function ===
+lossfun = @(params) compute_total_wasserstein(params, samples_obs, mu_0, sigma2_0, D, t, samples_per_t, time_indices);
 
-for ii = 1:numfiles
-    load(['~/Dropbox/Work/AT_Calcium/mat/data-001_ratio_' num2str(ii) '.mat'], ...
-        'data_cerebellum', 'data_cerebrum');
-    cat_cerebellum = [cat_cerebellum; data_cerebellum];
-    cat_cerebrum   = [cat_cerebrum; data_cerebrum];
+params0 = [0, 0];
+lb = [-20, -20];
+ub = [20, 20];
+opts = optimoptions('fmincon', 'Display','iter','MaxFunEvals',1e5,'MaxIter',1e4);
+
+[params_fit, fval] = fmincon(lossfun, params0, [],[],[],[], lb, ub, [], opts);
+alpha_fit = params_fit(1);
+beta_fit  = params_fit(2);
+
+%% === Evaluate fit ===
+ymax = 0;
+figure('Color','w'); hold on;
+set(gcf, 'Position', [600, 300, 500, 400]);
+
+legend_entries = {};
+f_true_all_eval = cell(1,2);
+f_fit_all_eval  = cell(1,2);
+
+for i = 1:2
+    tid = time_indices(i);
+    tval = t(tid);
+
+    % True
+    [f_true, ~] = ksdensity(q_true_all{tid}, xvals);
+    f_true_all_eval{i} = f_true;
+    plot(xvals, f_true, '-', 'Color', [0.8 0 0], 'LineWidth', 2);
+    legend_entries{end+1} = sprintf('t = %.1f (true)', tval);
+
+    % Fit
+    sigma2_t = sigma2_0 + 2 * D * t(tid);
+    mu_t     = mu_0;
+    x = mu_t + sqrt(sigma2_t) * randn(samples_per_t, 1);
+    logq = -0.5 * ((x - mu_t).^2 / sigma2_t);
+    logq = logq - mean(logq);
+    x_mod = x + alpha_fit * logq + beta_fit * (x - mu_t);
+
+    [f_fit, ~] = ksdensity(x_mod, xvals);
+    f_fit_all_eval{i} = f_fit;
+    plot(xvals, f_fit, '--k', 'LineWidth', 2);
+    legend_entries{end+1} = sprintf('t = %.1f (fit)', tval);
+
+    ymax = max([ymax, f_true, f_fit]);
 end
 
-tt = (1:numel(cat_cerebellum)) / Fs;
+% xlim([-1 2]); ylim([0 ymax*1.05]);
+xlabel('$x$', 'Interpreter','latex', 'FontSize', 16);
+ylabel('Probability Density', 'Interpreter','latex', 'FontSize', 16);
+title('Wasserstein-based fit of transformed densities');
+set(gca, 'FontSize', 14, 'LineWidth', 1.2);
 
-% === Plot ===
-figure;
-plot(tt, cat_cerebellum, 'k'); hold on;
-plot(tt, cat_cerebrum,   'r');
-xlabel('Time (s)');
-ylabel('Signal');
-legend({'Cerebellum', 'Cerebrum'});
-title('Concatenated Neural Activity Across Sessions');
-hold off;
+%% === Report errors ===
+alpha_err = abs(alpha_fit - alpha_true) / abs(alpha_true) * 100;
+beta_err  = abs(beta_fit  - beta_true ) / abs(beta_true )  * 100;
+fprintf('Alpha recovery error: %.2f%%\n', alpha_err);
+fprintf('Beta  recovery error: %.2f%%\n', beta_err);
 
-%% === Helper Functions ===
+%% === Additional Curve Similarity Metrics ===
+[W2, TVD, L2] = compute_fit_metrics(f_true_all_eval, f_fit_all_eval, xvals);
+fprintf('Avg Wasserstein-2 (CDF²): %.4f\n', W2);
+fprintf('Avg Total Variation Dist: %.4f\n', TVD);
+fprintf('Avg L2 error: %.4f\n', L2);
 
-function N = count_framenum(tifpath)
-    % Count number of frames in a .tif stack
-    N = 0;
-    try
-        while true
-            N = N + 1;
-            imread(tifpath, N);
-        end
-    catch
-        N = N - 1;
-    end
-end
 
-function [cerebrum_mask, cerebellum_mask] = get_all_region_masks(info)
-    % Extract binary masks for cerebrum and cerebellum
+%% === Subfunctions ===
+function loss = compute_total_wasserstein(params, samples_obs, mu_0, sigma2_0, D, t, n, time_indices)
+    alpha = params(1);
+    beta  = params(2);
+    loss = 0;
 
-    sz = size(info.data.Venus_fluorescence_image);
-    cerebrum_mask = false(sz);
-    cerebellum_mask = false(sz);
+    for idx = 1:numel(time_indices)
+        ti = time_indices(idx);
+        sigma2_t = sigma2_0 + 2 * D * t(ti);
+        mu_t     = mu_0;
 
-    for i = 1:numel(info.data.segment_area.cerebrum)
-        for j = 1:numel(info.data.segment_area.cerebrum{i})
-            mask = info.data.segment_area.cerebrum{i}{j};
-            if ~isempty(mask)
-                cerebrum_mask = cerebrum_mask | logical(mask);
-            end
-        end
-    end
+        x = mu_t + sqrt(sigma2_t) * randn(n, 1);
+        logq = -0.5 * ((x - mu_t).^2 / sigma2_t);
+        logq = logq - mean(logq);
+        x_mod = x + alpha * logq + beta * (x - mu_t);
 
-    for i = 1:numel(info.data.segment_area.cerebellum)
-        for j = 1:numel(info.data.segment_area.cerebellum{i})
-            mask = info.data.segment_area.cerebellum{i}{j};
-            if ~isempty(mask)
-                cerebellum_mask = cerebellum_mask | logical(mask);
-            end
-        end
-    end
-end
+        [f1, x1] = ksdensity(x_mod);
+        [f2, x2] = ksdensity(samples_obs{ti});
 
-function masked = MaskData(data, mask)
-    % Apply binary mask to 2D or 3D data and crop to bounding box
+        x_common = linspace(min([x1 x2]), max([x1 x2]), 300);
+        f1i = interp1(x1, f1, x_common, 'linear', 0);
+        f2i = interp1(x2, f2, x_common, 'linear', 0);
+        f1i = f1i / trapz(x_common, f1i);
+        f2i = f2i / trapz(x_common, f2i);
 
-    mask = double(mask);
-    [rowIdx, colIdx] = find(mask);
-    if isempty(rowIdx)
-        error('Mask is empty.');
-    end
-
-    rowMin = min(rowIdx); rowMax = max(rowIdx);
-    colMin = min(colIdx); colMax = max(colIdx);
-
-    if ndims(data) == 3
-        cropped = data(rowMin:rowMax, colMin:colMax, :);
-        mask_crop = mask(rowMin:rowMax, colMin:colMax);
-        mask3D = repmat(mask_crop, 1, 1, size(cropped, 3));
-        masked = cropped;
-        masked(~mask3D) = NaN;
-    else
-        cropped = data(rowMin:rowMax, colMin:colMax);
-        mask_crop = mask(rowMin:rowMax, colMin:colMax);
-        masked = cropped;
-        masked(~mask_crop) = NaN;
+        cdf1 = cumsum(f1i) / sum(f1i);
+        cdf2 = cumsum(f2i) / sum(f2i);
+        loss = loss + trapz(x_common, (cdf1 - cdf2).^2);
     end
 end
 
-function smoothed = gaussian_smooth(data, sigmaSpace, sigmaTime)
-    % Apply separable Gaussian smoothing in space and time
-
-    [H, W, T] = size(data);
-    smoothed = nan(H, W, T);
-
-    % === Spatial smoothing ===
-    kSizeSpace = 2 * ceil(3 * sigmaSpace) + 1;
-    Gspace = fspecial('gaussian', [kSizeSpace, kSizeSpace], sigmaSpace);
-
-    spatialSmoothed = nan(H, W, T);
-
-    for t = 1:T
-        frame = data(:,:,t);
-        mask = ~isnan(frame);
-        frame(~mask) = 0;
-
-        convFrame = conv2(frame, Gspace, 'same');
-        convMask  = conv2(double(mask), Gspace, 'same');
-        normFrame = convFrame ./ convMask;
-        normFrame(convMask == 0) = NaN;
-
-        spatialSmoothed(:,:,t) = normFrame;
+function [W2, TVD, L2] = compute_fit_metrics(f_true_all, f_fit_all, xvals)
+    n = length(f_true_all);
+    W2 = 0; TVD = 0; L2 = 0;
+    for i = 1:n
+        f1 = f_true_all{i};
+        f2 = f_fit_all{i};
+        dx = mean(diff(xvals));
+        cdf1 = cumsum(f1) * dx;
+        cdf2 = cumsum(f2) * dx;
+        W2  = W2  + trapz(xvals, (cdf1 - cdf2).^2);
+        TVD = TVD + 0.5 * trapz(xvals, abs(f1 - f2));
+        L2  = L2  + trapz(xvals, (f1 - f2).^2);
     end
-
-    % === Temporal smoothing ===
-    kSizeTime = 2 * ceil(3 * sigmaTime) + 1;
-    halfWin = floor(kSizeTime / 2);
-    Gtime = fspecial('gaussian', [1, kSizeTime], sigmaTime);
-    Gtime = Gtime / sum(Gtime);
-
-    padded = padarray(spatialSmoothed, [0 0 halfWin], NaN, 'both');
-
-    for t = 1:T
-        window = padded(:,:,t:t+kSizeTime-1);
-        weighted = bsxfun(@times, window, reshape(Gtime, 1, 1, []));
-        valid = ~isnan(window);
-
-        weightSum = sum(bsxfun(@times, valid, reshape(Gtime, 1, 1, [])), 3);
-        frameSum = nansum(weighted, 3);
-
-        normFrame = frameSum ./ weightSum;
-        normFrame(weightSum == 0) = NaN;
-
-        smoothed(:,:,t) = normFrame;
-    end
+    W2  = W2  / n;
+    TVD = TVD / n;
+    L2  = L2  / n;
 end

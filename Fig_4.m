@@ -1,91 +1,119 @@
-% generate_fig4.m
-% Figure 4: Simulated forward and inverse transformation of a Gaussian
+%==========================================================================
+% Generate Figure 4: Recovery of transformation parameters from dynamic signal
+%
+% This script:
+%   1. Simulates a 1D stochastic signal with time-varying drift
+%   2. Applies a nonlinear transformation based on log-density and global mean
+%   3. Estimates summary statistics in sliding windows
+%   4. Recovers transformation parameters (alpha, beta) using the stats model
+%   5. Reconstructs transformed signal and compares to ground truth
+%
+% Author: Erik D. Fagerholm
+% Date: 6 August 2025
+%==========================================================================
 
-clear; clc; close all;
+clear; clc; close all; rng(0);  % Reproducibility
 
-%% === Simulation Parameters ===
-mu_0      = 0;            % initial mean
-sigma2_0  = 1/4;          % initial variance
-D         = 0.02;         % diffusion coefficient
-alpha_true = 1.2;         % true entropy weight
-beta_true  = 7.4;         % true expectation weight
-T         = 50;           % number of time steps
-t         = linspace(0, 10, T);
-Nu        = 0.25;         % observation noise
-xvals     = linspace(-14, 14, 1000);  % domain for plotting
+%% === 1. Generate synthetic signal with drift ===
+T = 1000;                 % Number of time points
+dt = 0.05;                % Time step
+t = (0:T-1) * dt;         % Time vector
+D = 2;                    % Diffusion coefficient
 
-%% === Simulate forward Gaussian evolution ===
-mu_t      = mu_0 * ones(size(t));          % constant mean
-sigma2_t  = sigma2_0 + 2 * D * t;          % diffusion over time
+a = sin(2 * pi * 0.5 * t);  % Time-varying drift
+x = zeros(1, T);            % Initialize signal
 
-% Apply entropy+expectation flow (ground truth)
+for i = 2:T
+    x(i) = x(i-1) + a(i-1)*dt + sqrt(2*D*dt)*randn;
+end
+
+%% === 2. Estimate log-density log q(x(t)) via KDE ===
+[fhat, xgrid] = ksdensity(x);
+logq_vals = log(fhat + 1e-8);  % Avoid log(0)
+logq_x = interp1(xgrid, logq_vals, x, 'linear', 'extrap');
+logq_mean = mean(logq_x);
+
+%% === 3. Apply ground-truth transformation ===
+alpha_true = 0.2;
+beta_true  = 0.1;
+mu_global = mean(x);
+
+x_lambda = x + ...
+    alpha_true * (logq_x - logq_mean) + ...
+    beta_true  * (x - mu_global);
+
+%% === 4. Compute summary stats in sliding windows ===
+window = 100; step = 20;
+n_windows = floor((T - window) / step);
+mu_t     = zeros(1, n_windows);  % Mode
+sigma2_t = zeros(1, n_windows);  % Variance
+q_mu_t   = zeros(1, n_windows);  % PDF at mode
+
+for i = 1:n_windows
+    idx = (i-1)*step + (1:window);
+    xi = x(idx);
+
+    [pdf_vals, grid] = ksdensity(xi);
+    [~, id] = max(pdf_vals);
+
+    mu_t(i) = grid(id);       % Mode
+    sigma2_t(i) = var(xi);    % Variance
+    q_mu_t(i) = pdf_vals(id); % Estimated density at mode
+end
+
+%% === 5. Apply transformation to summary stats ===
 mu_lambda = mu_t + (beta_true .* sigma2_t) ./ (1 + alpha_true);
-q_lambda_height = sqrt(1 + alpha_true) ./ sqrt(2 * pi .* sigma2_t);
+q_lambda  = sqrt(1 + alpha_true) ./ sqrt(2 * pi .* sigma2_t);
 
-% Add Gaussian noise to simulate observation error
-rng(1);  % for reproducibility
-mu_lambda_obs = mu_lambda + Nu * randn(size(mu_lambda));
-q_lambda_obs  = q_lambda_height .* (1 + Nu * randn(size(q_lambda_height)));
+% Add mild observational noise
+mu_lambda_obs = mu_lambda + 0.03 * randn(size(mu_lambda));
+q_lambda_obs  = q_lambda  .* (1 + 0.03 * randn(size(q_lambda)));
 
-%% === Parameter Inversion (recovery from noisy measurements) ===
+%% === 6. Fit alpha and beta using summary stats ===
 errfun = @(params) sum( ...
-    (mu_lambda_obs - (mu_t + (params(2) * sigma2_t) ./ (1 + params(1)))).^2 + ...
-    (q_lambda_obs  - sqrt(1 + params(1)) ./ sqrt(2 * pi * sigma2_t)).^2 ...
+    (mu_lambda_obs - (mu_t + (params(2) .* sigma2_t) ./ (1 + params(1)))).^2 + ...
+    (q_lambda_obs  - sqrt(1 + params(1)) ./ sqrt(2 * pi .* sigma2_t)).^2 ...
 );
 
-params0 = [0.1, 0.1];  % initial guess
+params0 = [0, 0];  % Initial guess [alpha, beta]
 estimated = fminsearch(errfun, params0);
 alpha_fit = estimated(1);
 beta_fit  = estimated(2);
 
-% Reconstruct peak height and location using estimated parameters
-mu_lambda_fit      = mu_t + (beta_fit .* sigma2_t) ./ (1 + alpha_fit);
-q_lambda_fit_height = sqrt(1 + alpha_fit) ./ sqrt(2 * pi .* sigma2_t);
+%% === 7. Reconstruct signal using recovered parameters ===
+x_lambda_recon = x + ...
+    alpha_fit * (logq_x - logq_mean) + ...
+    beta_fit  * (x - mu_global);
 
-%% === Plot example timepoints ===
-t_idx = round(linspace(1, T, 2));  % select early and late timepoints
+%% === 8. Plot original, transformed, and reconstructed signals ===
+figure('Color','w');
+set(gcf, 'Position', [100, 100, 700, 500]);
+hold on;
 
-% Precompute max y-value across curves for consistent y-limits
-ymax = 0;
-for i = 1:length(t_idx)
-    tid = t_idx(i);
-    q_orig = normpdf(xvals, mu_t(tid), sqrt(sigma2_t(tid)));
-    q_true = normpdf(xvals, mu_lambda(tid), sqrt(1 / (2 * pi * sigma2_t(tid)) * (1 + alpha_true))^(-1));
-    q_fit  = normpdf(xvals, mu_lambda_fit(tid), sqrt(1 / (2 * pi * sigma2_t(tid)) * (1 + alpha_fit))^(-1));
-    ymax = max([ymax, q_orig, q_true, q_fit], [], 'all');
-end
-ymax = ymax * 1.1;
+plot(t, x_lambda, 'r', 'LineWidth', 1.5, 'DisplayName', 'Ground-truth');
+plot(t, x_lambda_recon, 'k--', 'LineWidth', 1.5, 'DisplayName', 'Recovered');
 
-% === Plot ===
-figure('Color','w'); 
-set(gcf,'Position',[676 1 349 536]);
+xlabel('$\mathit{Time}$',  'Interpreter','latex', 'FontSize', 22);
+ylabel('$\mathit{Signal}$','Interpreter','latex', 'FontSize', 22);
+legend('Location','north','Interpreter','latex','FontSize',12,'Box','off');
+set(gca,'FontSize',16,'LineWidth',1.2);
+xlim([1 5]);  % Adjust zoom for clarity
+% ylim([-1.5 0.5]);  % Optional
 
-for i = 1:length(t_idx)
-    tid = t_idx(i);
+%% === 9. Report recovery errors ===
+mae_alpha   = abs(alpha_fit - alpha_true);
+rmse_alpha  = sqrt((alpha_fit - alpha_true)^2);
+relerr_alpha = 100 * mae_alpha / abs(alpha_true);
 
-    % Generate distributions
-    q_orig = normpdf(xvals, mu_t(tid), sqrt(sigma2_t(tid)));
-    q_true = normpdf(xvals, mu_lambda(tid), sqrt(1 / (2 * pi * sigma2_t(tid)) * (1 + alpha_true))^(-1));
-    q_fit  = normpdf(xvals, mu_lambda_fit(tid), sqrt(1 / (2 * pi * sigma2_t(tid)) * (1 + alpha_fit))^(-1));
+mae_beta   = abs(beta_fit - beta_true);
+rmse_beta  = sqrt((beta_fit - beta_true)^2);
+relerr_beta = 100 * mae_beta / abs(beta_true);
 
-    % Plot
-    subplot(2,1,i)
-    plot(xvals, q_orig, 'b-', 'LineWidth', 1.5); hold on;
-    plot(xvals, q_true, 'r-', 'LineWidth', 1.5);
-    plot(xvals, q_fit,  'k--', 'LineWidth', 1.5);
-    xlim([-2 5]); 
-    ylim([0, ymax * 0.92]);
-    title(sprintf('t = %.1f', t(tid)), 'FontSize', 12);
-end
+fprintf('\nAlpha error: MAE=%.4f, RMSE=%.4f, %%Error=%.2f%%\n', mae_alpha, rmse_alpha, relerr_alpha);
+fprintf('Beta  error: MAE=%.4f, RMSE=%.4f, %%Error=%.2f%%\n', mae_beta, rmse_beta, relerr_beta);
 
-% Annotate figure
-sgtitle('Evolution of original, transformed, and recovered Gaussians', 'FontSize', 16);
-legend({'Original', 'Transformed (true)', 'Transformed (recovered)'}, ...
-    'Position',[0.35, 0.03, 0.3, 0.03], 'Orientation','horizontal', 'Box','off');
-
-%% === Report recovery accuracy ===
-alpha_error = abs(alpha_true - alpha_fit) / abs(alpha_true) * 100;
-beta_error  = abs(beta_true - beta_fit)   / abs(beta_true)  * 100;
-
-fprintf('Alpha recovery error: %.2f%%\n', alpha_error);
-fprintf('Beta recovery error:  %.2f%%\n', beta_error);
+%% === Additional fit quality metrics (optional) ===
+tv_dist = sum(abs(x_lambda - x_lambda_recon)) / length(x_lambda);
+l2_err  = sqrt(mean((x_lambda - x_lambda_recon).^2));
+fprintf('Total Variation Distance: %.4f\n', tv_dist);
+fprintf('L2 Error: %.4f\n', l2_err);

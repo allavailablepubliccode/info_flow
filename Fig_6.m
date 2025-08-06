@@ -1,78 +1,152 @@
-% generate_fig6.m
-% Figure 6: Visualization of signal trajectory in expectation–entropy space
+%==========================================================================
+% Generate Figure 6: Significant predictive connectivity across regions
+%
+% This script:
+%   - Loads data for M1–M5 and extracts PC1 (or mean) for each of 6 regions
+%   - Computes predictive strength (R²) using a power-law KDE model
+%   - Performs circular permutation test to get null distribution of R²
+%   - Applies FDR correction to obtain significant links
+%   - Plots R² matrices for each mouse (only significant and high values)
+%
+% Author: [Your Name]
+% Date: [Insert Date]
+%==========================================================================
 
-clear; clc; close all; rng(0);  % for reproducibility
+clear; clc; close all;
 
-%% === 1. Generate synthetic signal with drift ===
-T = 3000;              % number of time points
-dt = 0.01;             % time step
-t = (0:T-1) * dt;      % time vector
-D = 0.05;              % diffusion coefficient
-a = sin(2 * pi * 0.1 * t);  % slow sinusoidal drift
+%% === Parameters ===
+N = 1;                        % Lag (in timepoints)
+nSurrogates = 1000;           % Permutation samples per pair
+alpha_FDR = 0.05;             % FDR threshold
+use_pc1 = true;               % Use PC1 instead of region average
+nMice = 5; nRegions = 6;
 
-x = zeros(1, T);       % initialize signal
-for i = 2:T
-    x(i) = x(i-1) + a(i-1)*dt + sqrt(2*D*dt)*randn;
+% Initialize storage
+R2full     = nan(nMice, nRegions, nRegions);
+pvals      = nan(nMice, nRegions, nRegions);
+alpha_mat  = nan(nMice, nRegions, nRegions);
+beta_mat   = nan(nMice, nRegions, nRegions);
+
+%% === Main Loop: across mice and region pairs ===
+for ii = 1:nMice
+    fprintf('Processing Mouse %d...\n', ii);
+    
+    % Load and reshape
+    clear movie map
+    load(['~/Dropbox/Two_Photon/M' num2str(ii) '.mat']);
+    movie = reshape(movie, size(movie,1)*size(movie,2), size(movie,3));
+    map   = reshape(map,   size(map,1)*size(map,2), 1);
+
+    for jj = 1:nRegions  % Source region
+        First_idx = find(map == jj);
+        if isempty(First_idx), continue; end
+
+        First_mat = movie(First_idx, :);
+        First = extract_region_signal(First_mat, use_pc1);
+        First = First(N:end);  % Apply lag
+
+        for kk = 1:nRegions  % Target region
+            if jj == kk, continue; end
+
+            Second_idx = find(map == kk);
+            if isempty(Second_idx), continue; end
+
+            Second_mat = movie(Second_idx, :);
+            Second = extract_region_signal(Second_mat, use_pc1);
+            Second = Second(1:end-N+1);
+
+            if numel(First) < 10 || numel(Second) < 10, continue; end
+
+            [R2, ~, alpha, beta] = plaw_kde(First(:), Second(:));
+            if R2 < 0
+                R2full(ii,jj,kk) = NaN;
+                continue;
+            end
+
+            R2full(ii,jj,kk)     = R2;
+            alpha_mat(ii,jj,kk)  = alpha;
+            beta_mat(ii,jj,kk)   = beta;
+
+            % Permutation test (circular shift)
+            surrogate_R2s = nan(nSurrogates, 1);
+            for s = 1:nSurrogates
+                shift = randi(numel(First));
+                First_shifted = circshift(First, shift);
+                surrogate_R2s(s) = plaw_kde(First_shifted(:), Second(:));
+            end
+
+            pvals(ii,jj,kk) = mean(surrogate_R2s >= R2);
+        end
+    end
 end
 
-%% === 2. Estimate log-density log q(x(t)) via histogram ===
-[counts, edges] = histcounts(x, 100, 'Normalization', 'pdf');
-bin_centers = 0.5 * (edges(1:end-1) + edges(2:end));
-logq_vals = log(counts + 1e-8);       % avoid log(0)
-logq_mean = mean(logq_vals);          % baseline log-density
+%% === FDR Correction ===
+p_flat = pvals(:);
+valid = ~isnan(p_flat);
 
-logq_x = interp1(bin_centers, logq_vals, x, 'linear', 'extrap');  % log-density at x(t)
+[p_fdr, passed] = fdr_bh(p_flat(valid), alpha_FDR, 'pdep', 'yes');
+sig_mask = false(size(p_flat));
+sig_mask(valid) = passed;
+sig_mask = reshape(sig_mask, size(R2full));
 
-%% === 3. Apply entropy + expectation transformation ===
-alpha_true = 0.3;
-beta_true  = 0.9;
-mu_global  = mean(x);
+% Mask R² values: only significant and > 0.7 shown
+R2masked = R2full;
+R2masked(~sig_mask) = NaN;
+R2masked(R2masked < 0.7) = NaN;
 
-x_lambda = x + ...
-    alpha_true * (logq_x - logq_mean) + ...
-    beta_true  * (x - mu_global);  % apply transformation
-
-%% === 4. Compute summary stats in sliding windows ===
-window = 100;       % sliding window size (frames)
-step = 10;          % step size (frames)
-n_windows = floor((T - window) / step);
-
-% Preallocate
-mu_t     = zeros(1, n_windows);
-logvar_t = zeros(1, n_windows);
-mu_lambda_t     = zeros(1, n_windows);
-logvar_lambda_t = zeros(1, n_windows);
-
-for i = 1:n_windows
-    idx = (i-1)*step + (1:window);
-    xi  = x(idx);
-    xli = x_lambda(idx);
-
-    mu_t(i)          = mean(xi);
-    logvar_t(i)      = log(var(xi) + 1e-8);  % log-variance as entropy proxy
-    mu_lambda_t(i)   = mean(xli);
-    logvar_lambda_t(i) = log(var(xli) + 1e-8);
+%% === Plot Significant R² Matrices for Each Mouse ===
+figure('Color', 'w'); set(gcf, 'Position', [1, 378, 1024, 159]);
+for ii = 1:nMice
+    subplot(1, nMice, ii);
+    tmp = squeeze(R2masked(ii,:,:));
+    h = imagesc(tmp);
+    set(h, 'AlphaData', ~isnan(tmp));
+    title(['Mouse M' num2str(ii)]);
+    colormap gray;
+    clim([min(R2masked(:)), max(R2masked(:))]);
 end
 
-time_axis = (0:n_windows-1) * step * dt;  % convert frame to time
+% Separate colorbar
+figure('Color','w');
+colormap gray;
+clim([min(R2masked(:)), max(R2masked(:))]);
+colorbar;
+sgtitle('Significant R² values (FDR-corrected)');
 
-%% === 5. Plot trajectory in 3D information space ===
-figure('Position', [100, 100, 1200, 800], 'Color', 'w');
+%% === Summary Metrics: AM Input Consistency ===
+fprintf('\nNumber of significant connections after FDR:\n');
+disp(sum(sig_mask(:)));
 
-plot3(mu_t, time_axis, logvar_t, ...
-    'k-', 'LineWidth', 3, 'DisplayName', 'Original');
+AM_idx = 2;  % Anteromedial target
+labels = {'A','M','L','P','R','V'};
+group_R2_to_AM = nan(nMice, nRegions);
 
-hold on;
+for i = 1:nMice
+    for j = 1:nRegions
+        if j == AM_idx, continue; end
+        group_R2_to_AM(i,j) = R2masked(i,j,AM_idx);
+    end
+end
 
-plot3(mu_lambda_t, time_axis, logvar_lambda_t, ...
-    'r-', 'LineWidth', 3, 'DisplayName', 'Transformed');
+% Average R² and presence of significant input across mice
+mean_R2_to_AM = nanmean(group_R2_to_AM, 1);
+presence_mask = ~isnan(group_R2_to_AM);
+consistency_to_AM = sum(presence_mask, 1) / nMice;
 
-xlabel('Expectation (mean)', 'FontSize', 14);
-ylabel('Time', 'FontSize', 14);
-zlabel('Log variance (entropy proxy)', 'FontSize', 14);
-grid on;
-legend('Location','best', 'FontSize', 14);
-view(58, 47);  % camera angle
+%% === Subfunctions ===
 
-% Save as vector graphic
-exportgraphics(gca, '~/Desktop/Fig6.eps', 'ContentType', 'vector');
+function sig = extract_region_signal(region_mat, use_pc1)
+    % Returns either first PC or average time series for a region
+    if use_pc1
+        sig = pca_first_component(region_mat);
+    else
+        sig = mean(region_mat, 1)';
+    end
+end
+
+function pc1 = pca_first_component(data_mat)
+    % First principal component of a region (time series)
+    data_mat = detrend(data_mat')';  % Optional detrending
+    [~, score, ~] = pca(data_mat');
+    pc1 = score(:,1);
+end

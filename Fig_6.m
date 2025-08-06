@@ -8,8 +8,8 @@
 %   - Applies FDR correction to obtain significant links
 %   - Plots R² matrices for each mouse (only significant and high values)
 %
-% Author: [Your Name]
-% Date: [Insert Date]
+% Author: Erik D. Fagerholm
+% Date: Erik D. Fagerholm
 %==========================================================================
 
 clear; clc; close all;

@@ -111,10 +111,10 @@ for ii = 1:nMice
     h = imagesc(tmp);
     set(h, 'AlphaData', ~isnan(tmp));  % Transparent where NaN
     axis square;
-    colormap(flipud(jet));  % makes white = low, black = high
-    clim([nanmin(R2masked(:)), nanmax(R2masked(:))]);
+    colormap(flipud(gray));  % makes white = low, black = high
+    clim([0.1350, 0.9024]);
     title(['Mouse M' num2str(ii)]);
-
+    colorbar
     
     % Overlay 'X' on non-significant off-diagonals
     for r = 1:nRegions

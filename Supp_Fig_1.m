@@ -111,7 +111,7 @@ for ii = 1:nMice
     axis square;
     colorbar
     colormap(flipud(gray));
-    clim([nanmin(R2masked_bonf(:)), nanmax(R2masked_bonf(:))]);
+    clim([0.1350, 0.9024]);
     title(['Mouse M' num2str(ii)]);
 
     % Overlay 'X' on non-significant off-diagonals
